@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Torii Traveler</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState, useEffect, useCallback } = React;
+
+        const JapanRunnerGame = () => {
+          const [gameState, setGameState] = useState({
+            playerX: 50, // percentage from left
+            score: 0,
+            suitcaseSize: 150, // base size
+            gates: [],
+            gameSpeed: 2,
+            isPlaying: false
+          });
+
+          const [keys, setKeys] = useState({});
+          const [audioContext, setAudioContext] = useState(null);
+          const bellAudioRef = React.useRef(null);
+          const missAudioRef = React.useRef(null); // Ref for missed gate sound
+          const taikoAudioRef = React.useRef(null); // Ref for taiko background music
+          const [suitcaseMissed, setSuitcaseMissed] = useState(false);
+          const [particles, setParticles] = useState([]);
+
+          // Initialize audio context
+          useEffect(() => {
+            const initAudio = () => {
+              try {
+                const context = new (window.AudioContext || window.webkitAudioContext)();
+                setAudioContext(context);
+              } catch (error) {
+                console.log('Audio not supported:', error);
+              }
+            };
+            
+            initAudio();
+          }, []);
+
+          // Replace playPachinkoSound to play the bell MP3
+          const playPachinkoSound = useCallback(() => {
+            if (!bellAudioRef.current) return;
+            // Restart the sound from the beginning
+            bellAudioRef.current.currentTime = 0;
+            bellAudioRef.current.play();
+          }, []);
+
+          // Play missed gate sound and show suitcase effect
+          const playMissSound = useCallback(() => {
+            if (!missAudioRef.current) return;
+            missAudioRef.current.currentTime = 0;
+            missAudioRef.current.play();
+            // Particle explosion
+            const newParticles = [];
+            const count = 18;
+            for (let i = 0; i < count; i++) {
+              const angle = (2 * Math.PI * i) / count;
+              newParticles.push({
+                id: Date.now() + Math.random() + i,
+                x: 0.5, // center of suitcase (relative)
+                y: 0.5,
+                dx: Math.cos(angle) * (Math.random() * 1.5 + 1.5),
+                dy: Math.sin(angle) * (Math.random() * 1.5 + 1.5),
+                life: 0
+              });
+            }
+            setParticles(particles => [...particles, ...newParticles]);
+          }, []);
+
+          // Initialize gates
+          const createGate = (id, y) => ({
+            id,
+            x: Math.random() * 60 + 20, // 20-80% from left
+            y,
+            width: 20, // 2:3 ratio: width 20%
+            height: 30, // 2:3 ratio: height 30%
+            passed: false,
+            collided: false,
+            missed: false,
+            fadeIn: true, // New: fade in when created
+            fadeInStart: Date.now() // New: timestamp for fade-in
+          });
+
+          // Initialize game
+          const initGame = useCallback(() => {
+            // Only create a single gate at the horizon
+            const initialGates = [createGate(Date.now(), 30)];
+            setGameState(prev => ({
+              ...prev,
+              gates: initialGates,
+              isPlaying: true,
+              score: 0,
+              suitcaseSize: 150,
+              playerX: 50
+            }));
+          }, []);
+
+          // Handle keyboard input
+          useEffect(() => {
+            const handleKeyDown = (e) => {
+              setKeys(prev => ({ ...prev, [e.key]: true }));
+            };
+
+            const handleKeyUp = (e) => {
+              setKeys(prev => ({ ...prev, [e.key]: false }));
+            };
+
+            window.addEventListener('keydown', handleKeyDown);
+            window.addEventListener('keyup', handleKeyUp);
+
+            return () => {
+              window.removeEventListener('keydown', handleKeyDown);
+              window.removeEventListener('keyup', handleKeyUp);
+            };
+          }, []);
+
+          // Play/stop taiko background music when game starts/stops
+          useEffect(() => {
+            const taiko = taikoAudioRef.current;
+            if (!taiko) return;
+            if (gameState.isPlaying) {
+              taiko.currentTime = 0;
+              const playPromise = taiko.play();
+              if (playPromise !== undefined) {
+                playPromise.catch(() => {
+                  // Autoplay restrictions: try to resume on user interaction
+                  const resume = () => {
+                    taiko.play();
+                    window.removeEventListener('pointerdown', resume);
+                  };
+                  window.addEventListener('pointerdown', resume);
+                });
+              }
+            } else {
+              taiko.pause();
+              taiko.currentTime = 0;
+            }
+          }, [gameState.isPlaying]);
+
+          // Game loop
+          useEffect(() => {
+            if (!gameState.isPlaying) return;
+
+            const gameLoop = setInterval(() => {
+              setGameState(prev => {
+                let newPlayerX = prev.playerX;
+                
+                // Handle player movement
+                if (keys['ArrowLeft'] || keys['a']) {
+                  newPlayerX = Math.max(5, prev.playerX - 3);
+                }
+                if (keys['ArrowRight'] || keys['d']) {
+                  newPlayerX = Math.min(95, prev.playerX + 3);
+                }
+
+                // Move gates down (slow down by 50%)
+                let updatedGates = prev.gates.map(gate => ({
+                  ...gate,
+                  y: gate.y + prev.gameSpeed * 0.5 // Slow down by 50%
+                }));
+
+                // Check collisions and scoring
+                let newScore = prev.score;
+                let newSuitcaseSize = prev.suitcaseSize;
+
+                updatedGates.forEach(gate => {
+                  // Calculate the bottom of the gate
+                  const gateBottom = gate.y + gate.height;
+                  // The top of the player's head is at ~86% (player at 90%, head is 8px tall)
+                  const playerHeadTop = 86;
+                  const playerLeft = newPlayerX - 3;
+                  const playerRight = newPlayerX + 3;
+                  const gateLeft = gate.x - gate.width / 2;
+                  const gateRight = gate.x + gate.width / 2;
+                  const gateMiddle = gate.x;
+
+                  // Trigger successful pass when gate bottom reaches top of player's head
+                  if (gateBottom >= playerHeadTop && !gate.passed && !gate.collided) {
+                    // Check if player is in the middle of the gate (successful pass)
+                    if (Math.abs(newPlayerX - gateMiddle) < 8) {
+                      gate.passed = true;
+                      newScore += 1;
+                      newSuitcaseSize = Math.max(60, newSuitcaseSize - 9);
+                      playPachinkoSound();
+                    }
+                    // Check collision with gate posts
+                    else if (
+                      (playerLeft < gateLeft + 3 && playerRight > gateLeft - 3) ||
+                      (playerLeft < gateRight + 3 && playerRight > gateRight - 3)
+                    ) {
+                      gate.collided = true;
+                      newScore = Math.max(0, newScore - 1);
+                      newSuitcaseSize = Math.min(240, newSuitcaseSize + 15);
+                    }
+                    // Move missed gate check to trigger as soon as gate passes player's head
+                    else if (!gate.passed && !gate.collided && !gate.missed) {
+                      gate.missed = true;
+                      newSuitcaseSize = Math.min(240, newSuitcaseSize + 15);
+                      playMissSound();
+                    }
+                  }
+                });
+
+                // Fade out gates that reach the bottom
+                updatedGates = updatedGates.map(gate => {
+                  const minY = -100, maxY = 75;
+                  const minScale = 0.05, maxScale = 1.25;
+                  const clampedY = Math.max(minY, Math.min(gate.y, maxY));
+                  const t = (clampedY - minY) / (maxY - minY);
+                  const easeIn = t * t * t;
+                  const scale = minScale + (maxScale - minScale) * easeIn;
+                  const gateHeightScaled = gate.height * scale;
+                  let clampedTop = gate.y;
+                  if (clampedTop + gateHeightScaled > 100) {
+                    clampedTop = 100 - gateHeightScaled;
+                  }
+                  // Only mark as fading if the gate's top is at or below 100% (bottom of screen)
+                  if (!gate.fading && clampedTop + gateHeightScaled >= 100) {
+                    return { ...gate, fading: true, fadeStart: Date.now() };
+                  }
+                  return gate;
+                });
+
+                // Remove gates that have finished fading (after 200ms)
+                const now = Date.now();
+                updatedGates = updatedGates.filter(gate => !(gate.fading && gate.fadeStart && now - gate.fadeStart > 200));
+
+                // Fade in gates that are new (fadeIn)
+                const fadeInDuration = 400; // ms
+                updatedGates = updatedGates.map(gate => {
+                  if (gate.fadeIn) {
+                    const now = Date.now();
+                    const elapsed = now - (gate.fadeInStart || now);
+                    if (elapsed >= fadeInDuration) {
+                      return { ...gate, fadeIn: false };
+                    }
+                  }
+                  return gate;
+                });
+
+                // Remove gates that are off screen and add new ones
+                // Only remove if the gate's top is well below the bottom (e.g., y > 130)
+                const visibleGates = updatedGates.filter(gate => gate.y < 130);
+                
+                // Only add a new gate if there are no gates visible
+                if (visibleGates.length === 0) {
+                  visibleGates.push(createGate(Date.now() + Math.random(), 30));
+                }
+
+                return {
+                  ...prev,
+                  playerX: newPlayerX,
+                  gates: visibleGates,
+                  score: newScore,
+                  suitcaseSize: newSuitcaseSize,
+                  gameSpeed: Math.min(4, 2 + newScore * 0.1) // Gradually increase speed
+                };
+              });
+            }, 50);
+
+            return () => clearInterval(gameLoop);
+          }, [gameState.isPlaying, keys, playPachinkoSound, playMissSound]);
+
+          // Particle animation effect
+          useEffect(() => {
+            if (particles.length === 0) return;
+            const interval = setInterval(() => {
+              setParticles(prev => prev
+                .map(p => ({ ...p, x: p.x + p.dx * 0.06, y: p.y + p.dy * 0.06, life: p.life + 1 }))
+                .filter(p => p.life < 12)
+              );
+            }, 16);
+            return () => clearInterval(interval);
+          }, [particles]);
+
+          return React.createElement(
+            React.Fragment,
+            null,
+            React.createElement('audio', {
+              ref: bellAudioRef,
+              src: 'ping.m4a',
+              preload: 'auto',
+            }),
+            React.createElement('audio', {
+              ref: missAudioRef,
+              src: 'gong.m4a',
+              preload: 'auto',
+            }),
+            React.createElement('audio', {
+              ref: taikoAudioRef,
+              src: 'taiko.m4a',
+              preload: 'auto',
+              loop: true
+            }),
+            React.createElement('div', {
+              className: "w-full h-screen overflow-hidden relative",
+              style: {
+                backgroundImage: 'url("fuji-foothills.jpg")',
+                backgroundSize: 'cover',
+                backgroundPosition: 'center',
+                backgroundRepeat: 'no-repeat'
+              }
+            }, [
+              // Retro grid background
+              React.createElement('div', {
+                key: 'grid',
+                className: "absolute inset-0 opacity-20",
+                style: {
+                  backgroundImage: `
+                    linear-gradient(rgba(255,0,255,0.3) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(255,0,255,0.3) 1px, transparent 1px)
+                  `,
+                  backgroundSize: '20px 20px',
+                  transform: `translateY(${gameState.gates[0]?.y || 0}px)`
+                }
+              }),
+
+              // Score UI
+              React.createElement('div', {
+                key: 'score',
+                className: "absolute top-4 left-4 text-white font-mono text-xl z-10"
+              }, React.createElement('div', {
+                className: "bg-black bg-opacity-50 p-2 rounded border-2 border-cyan-400"
+              }, `SCORE: ${gameState.score}`)),
+
+              // Suitcase size UI
+              React.createElement('div', {
+                key: 'suitcase',
+                className: "absolute top-4 right-4 text-white font-mono text-sm z-10"
+              }, React.createElement('div', {
+                className: "bg-black bg-opacity-50 p-2 rounded border-2 border-cyan-400"
+              }, `SUITCASE: ${Math.round(gameState.suitcaseSize)}%`)),
+
+              // Game area
+              React.createElement('div', {
+                key: 'gamearea',
+                className: "relative w-full h-full"
+              }, [
+                // Gates
+                ...gameState.gates.map(gate => {
+                  // Calculate scale based on y position (top: small, bottom: large)
+                  const minY = -100, maxY = 75;
+                  const minScale = 0.01, maxScale = 1.25; // Start much smaller
+                  const clampedY = Math.max(minY, Math.min(gate.y, maxY));
+                  const t = (clampedY - minY) / (maxY - minY);
+                  const easeIn = t * t * t;
+                  let scale = minScale + (maxScale - minScale) * easeIn;
+                  // Fade in scale: if gate.fadeIn, interpolate scale from 0.01 to normal scale
+                  // But do not clamp scale by fade-in progress; let scale always follow y-position
+                  // Only use fadeIn for opacity
+                  let opacity = 1;
+                  if (gate.fadeIn) {
+                    const now = Date.now();
+                    const elapsed = now - (gate.fadeInStart || now);
+                    const fadeInDuration = 400;
+                    opacity = Math.min(1, Math.max(0, elapsed / fadeInDuration));
+                  } else if (gate.fading) {
+                    // Fade out at the bottom
+                    const now = Date.now();
+                    const elapsed = now - (gate.fadeStart || now);
+                    const fadeOutDuration = 200;
+                    opacity = Math.max(0, 1 - elapsed / fadeOutDuration);
+                  }
+                  // Clamp gate.y so the gate stays fully on screen vertically
+                  const gateHeightScaled = gate.height * scale;
+                  let clampedTop = gate.y;
+                  if (clampedTop + gateHeightScaled > 100) {
+                    clampedTop = 100 - gateHeightScaled;
+                  }
+                  // Fade out if fading
+                  const fadeStyle = {
+                    opacity,
+                    transition: 'opacity 0.2s linear, transform 0.4s cubic-bezier(0.4,0,0.2,1)'
+                  };
+                  return (
+                    React.createElement('div', {
+                      key: gate.id,
+                      className: "absolute",
+                      style: {
+                        left: `calc(${gate.x - gate.width/2}% - ${(gate.width * (scale - 1) / 2)}%)`,
+                        top: `${clampedTop}%`,
+                        width: `${gate.width}%`,
+                        height: `${gate.height}%`,
+                        transform: `scale(${scale})`,
+                        transformOrigin: 'center top',
+                        zIndex: Math.round(scale * 100),
+                        ...fadeStyle
+                      }
+                    }, [
+                      // Left post
+                      React.createElement('div', {
+                        key: 'left',
+                        className: `absolute ${
+                          gate.collided ? 'bg-red-500 border-red-700' : gate.passed ? 'bg-green-400 border-green-600' : 'bg-red-600 border-red-800'
+                        } border-2 shadow-lg`,
+                        style: { 
+                          left: '8%', 
+                          width: '12%', 
+                          height: '100%',
+                          imageRendering: 'pixelated'
+                        }
+                      }),
+                      // Right post
+                      React.createElement('div', {
+                        key: 'right',
+                        className: `absolute ${
+                          gate.collided ? 'bg-red-500 border-red-700' : gate.passed ? 'bg-green-400 border-green-600' : 'bg-red-600 border-red-800'
+                        } border-2 shadow-lg`,
+                        style: { 
+                          right: '8%', 
+                          width: '12%', 
+                          height: '100%',
+                          imageRendering: 'pixelated'
+                        }
+                      }),
+                      // Top beam
+                      React.createElement('div', {
+                        key: 'top',
+                        className: `absolute ${
+                          gate.collided ? 'bg-red-500 border-red-700' : gate.passed ? 'bg-green-400 border-green-600' : 'bg-red-600 border-red-800'
+                        } border-2 shadow-lg`,
+                        style: { 
+                          top: '10%', 
+                          left: '4%',
+                          width: '92%', 
+                          height: '20%',
+                          imageRendering: 'pixelated'
+                        }
+                      }),
+                      // Lower beam
+                      React.createElement('div', {
+                        key: 'lower',
+                        className: `absolute ${
+                          gate.collided ? 'bg-red-400 border-red-600' : gate.passed ? 'bg-green-300 border-green-500' : 'bg-red-500 border-red-700'
+                        } border-2 shadow-md`,
+                        style: { 
+                          top: '50%', 
+                          left: '8%',
+                          width: '84%', 
+                          height: '15%',
+                          imageRendering: 'pixelated'
+                        }
+                      }),
+                      // Roof overhang
+                      React.createElement('div', {
+                        key: 'roof',
+                        className: `absolute ${
+                          gate.collided ? 'bg-red-600 border-red-800' : gate.passed ? 'bg-green-500 border-green-700' : 'bg-red-700 border-red-900'
+                        } border-2`,
+                        style: { 
+                          top: '0%', 
+                          left: '0%',
+                          width: '100%', 
+                          height: '15%',
+                          borderRadius: '0 0 4px 4px',
+                          imageRendering: 'pixelated'
+                        }
+                      })
+                    ])
+                  );
+                }),
+
+                // Player
+                React.createElement('div', {
+                  key: 'player',
+                  className: "absolute transition-all duration-100",
+                  style: {
+                    left: `${gameState.playerX - 3}%`,
+                    top: '90%', // Move player to the bottom
+                    transform: 'translateY(-100%)', // Anchor to bottom
+                  }
+                }, React.createElement('div', {
+                  className: "relative"
+                }, [
+                  // Suitcase
+                  React.createElement('div', {
+                    key: 'suitcase',
+                    className: `absolute bg-yellow-400 border-2 border-yellow-600`,
+                    style: {
+                      width: `${gameState.suitcaseSize * 0.42}px`,
+                      height: `${gameState.suitcaseSize * 0.28}px`,
+                      left: '50%',
+                      top: '50%',
+                      transform: 'translate(-70%, -20%)',
+                      imageRendering: 'pixelated',
+                      overflow: 'visible',
+                      zIndex: 2
+                    }
+                  }, [
+                    // Particle explosion
+                    particles.map(p => React.createElement('div', {
+                      key: p.id,
+                      className: 'absolute rounded-full',
+                      style: {
+                        left: `${p.x * gameState.suitcaseSize * 0.42}px`,
+                        top: `${p.y * gameState.suitcaseSize * 0.28}px`,
+                        width: '10px',
+                        height: '10px',
+                        background: 'rgba(239,68,68,0.85)',
+                        boxShadow: '0 0 8px 2px #f87171',
+                        opacity: 1 - p.life / 12,
+                        pointerEvents: 'none',
+                        zIndex: 3
+                      }
+                    })),
+                    React.createElement('div', { key: 'inner', className: "absolute inset-1 border border-yellow-600" }),
+                    React.createElement('div', { key: 'clasp', className: "absolute w-2 h-1 bg-gray-600 top-1 right-1" }),
+                    React.createElement('div', { key: 'handle1', className: "absolute bg-gray-700 border border-gray-800", style: { width: '6px', height: '3px', top: '-6px', left: '50%', transform: 'translateX(-50%)' }}),
+                    React.createElement('div', { key: 'handle2', className: "absolute bg-gray-700 border border-gray-800", style: { width: '2px', height: '8px', top: '-6px', left: '50%', transform: 'translateX(-3px)' }}),
+                    React.createElement('div', { key: 'handle3', className: "absolute bg-gray-700 border border-gray-800", style: { width: '2px', height: '8px', top: '-6px', left: '50%', transform: 'translateX(1px)' }})
+                  ]),
+                  // Player body
+                  React.createElement('div', {
+                    key: 'body',
+                    className: "w-12 h-16 bg-blue-400 border border-blue-600 relative"
+                  }, [
+                    React.createElement('div', { key: 'head', className: "absolute w-8 h-8 bg-pink-200 border border-pink-400 -top-8 left-2" }),
+                    React.createElement('div', { key: 'leftarm', className: "absolute w-2 h-6 bg-pink-200 border border-pink-400 -left-2 top-2" }),
+                    React.createElement('div', { key: 'rightarm', className: "absolute w-2 h-6 bg-pink-200 border border-pink-400 -right-2 top-2" }),
+                    React.createElement('div', { key: 'leftleg', className: "absolute w-4 h-6 bg-black border border-gray-600 -bottom-6 left-0" }),
+                    React.createElement('div', { key: 'rightleg', className: "absolute w-4 h-6 bg-black border border-gray-600 -bottom-6 right-0" })
+                  ])
+                ]))
+              ]),
+
+              // Start screen
+              !gameState.isPlaying && React.createElement('div', {
+                key: 'startscreen',
+                className: "absolute inset-0 bg-black bg-opacity-80 flex items-center justify-center z-[9999]"
+              }, React.createElement('div', {
+                className: "text-center text-white font-mono"
+              }, [
+                React.createElement('h1', { key: 'title', className: "text-4xl mb-4 text-cyan-400 font-bold" }, "TORII TRAVELER"),
+                React.createElement('p', { key: 'desc1', className: "text-lg mb-2" }, "Navigate through torii gates to reach the train!"),
+                React.createElement('p', { key: 'desc2', className: "text-sm mb-4" }, "Pass through the middle of gates to score points and shrink your suitcase"),
+                React.createElement('p', { key: 'controls', className: "text-sm mb-6" }, "Use ← → arrow keys or A/D to move"),
+                React.createElement('button', {
+                  key: 'startbtn',
+                  onClick: initGame,
+                  className: "bg-cyan-400 text-black px-6 py-3 rounded font-bold hover:bg-cyan-300 transition-colors border-2 border-cyan-600"
+                }, "スタート")
+              ])),
+
+              // Stop button (visible during gameplay)
+              gameState.isPlaying && React.createElement('button', {
+                key: 'stopbtn',
+                onClick: () => setGameState(prev => ({ ...prev, isPlaying: false })),
+                className: "absolute top-4 right-1/2 translate-x-1/2 bg-red-500 text-white px-4 py-2 rounded font-bold border-2 border-red-700 z-[9999] hover:bg-red-400 transition-colors"
+              }, '止まれ'),
+
+              // Instructions
+              gameState.isPlaying && React.createElement('div', {
+                key: 'instructions',
+                className: "absolute bottom-4 left-4 text-white font-mono text-xs"
+              }, React.createElement('div', {
+                className: "bg-black bg-opacity-50 p-2 rounded border border-cyan-400"
+              }, "← → or A/D to move"))
+            ])
+          );
+        };
+
+        ReactDOM.render(React.createElement(JapanRunnerGame), document.getElementById('root'));
+    </script>
+</body>
+</html>
